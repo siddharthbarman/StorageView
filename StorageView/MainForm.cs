@@ -1,6 +1,9 @@
 ﻿using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Auth;
 using Microsoft.WindowsAzure.Storage.Blob;
+using Microsoft.WindowsAzure.Storage.Queue;
+using Microsoft.WindowsAzure.Storage.Queue.Protocol;
+using Microsoft.WindowsAzure.Storage.Table;
 using System;
 using System.Collections.Generic;
 using System.Configuration;
@@ -17,15 +20,96 @@ namespace StorageView
             InitializeComponent();			
         }
 
-		private bool m_useETagCheck;
+		#region Fields
+				
 		private CloudBlobClient m_blobClient;
+		private CloudTableClient m_storageTableClient;
+		private CloudQueueClient m_queueClient;
 		private BlobRequestOptions m_blobRequestOptions = new BlobRequestOptions();
 		private int m_blockSizeKB = 4;
-		private const int IDX_STATUS = 8;
+		private int m_peekMessageCount = 32; // This is the max allowed!
 		private Dictionary<ListViewItem, string> m_leaseIds = new Dictionary<ListViewItem, string>();
+
+		private TreeNode m_blobNode;
+		private TreeNode m_tableNode;
+		private TreeNode m_queueNode;
+
+		private const int IDX_STATUS = 8;
+		private const int IMG_STORAGE_STACK = 0;
+		private const int IMG_FOLDER = 1;
+		private const int IMG_BLOB_STORAGE = 2;
+		private const int IMG_STORAGE = 3;
+		private const int IMG_STORAGE_TABLE = 4;
+		private const int IMG_STORAGE_QUEUE = 5;
+
+		bool TrackOperationContext {
+			get { return m_mnuTrackOperationContext.Checked; }
+		}
+
+		bool CheckETag {
+			get { return m_mnuBlobCheckETags.Checked; }
+		}
+
+		#endregion
+
+		#region General methods
+
+		DialogResult ConfirmYesNo(string title, string text, params object[] args) {
+			string str = string.Format(text, args);
+			return MessageBox.Show(str, title, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+		}
+
+		OperationContext CreateOperationContextIfNeeded() {
+			if (TrackOperationContext) {
+				OperationContext ctx = new OperationContext();
+				ctx.CustomUserAgent = "Storage View";
+				ctx.LogLevel = LogLevel.Verbose;
+				ctx.RequestCompleted += (sender, e) => {
+					WriteInfoSafe("Req complete. Http status: {0}, bytes out: {1}, bytes in: {2}",
+						e.RequestInformation.HttpStatusCode, e.RequestInformation.EgressBytes, e.RequestInformation.IngressBytes);
+				};
+				ctx.ResponseReceived += (sender, e) => {
+					WriteInfoSafe("Resp recvd. Http status: {0}, bytes out: {1}, bytes in: {2}",
+						e.RequestInformation.HttpStatusCode, e.RequestInformation.EgressBytes, e.RequestInformation.IngressBytes);
+				};
+				ctx.Retrying += (sender, e) => {
+					WriteInfoSafe("Retrying. Http status: {0}, bytes out: {1}, bytes in: {2}",
+						e.RequestInformation.HttpStatusCode, e.RequestInformation.EgressBytes, e.RequestInformation.IngressBytes);
+				};
+				ctx.SendingRequest += (sender, e) => {
+					WriteInfoSafe("Sending req. Http status: {0}, bytes out: {1}, bytes in: {2}",
+						e.RequestInformation.HttpStatusCode, e.RequestInformation.EgressBytes, e.RequestInformation.IngressBytes);
+				};
+				return ctx;
+			}
+			else {
+				return null;
+			}
+		}
+
+		void WriteInfoSafe(string format, params object[] args) {
+			this.Invoke((MethodInvoker)delegate {
+				WriteInfo(format, args);
+			});
+		}
+
+		void WriteInfo(string format, params object[] args) {
+			string line = string.Format("{0} {1}", DateTime.Now.ToShortTimeString(),
+				string.Format(format, args));
+			m_txtInfo.Text = m_txtInfo.Text + line + "\r\n";
+		}
+
+		void SetTreeNode(TreeNode node, int imageIndex, bool isLoaded = true, object context = null) {
+			node.ImageIndex = imageIndex;
+			node.SelectedImageIndex = imageIndex;
+			node.Tag = new NodeWrapper(isLoaded, context);
+		}
 
 		void Connect() {
 			m_blobClient = null;
+			m_storageTableClient = null;
+			m_queueClient = null;
+
 			ConnectForm form = new ConnectForm();
 
 			if (ConfigurationManager.AppSettings["AccessKey"] != null)
@@ -37,7 +121,98 @@ namespace StorageView
 			if (form.ShowDialog() == DialogResult.OK) {
 				var creds = new StorageCredentials(form.StorageAccount, form.AccessKey);
 				var acc = new CloudStorageAccount(creds, form.UseHttps);
-				m_blobClient = acc.CreateCloudBlobClient();				
+
+				m_blobClient = acc.CreateCloudBlobClient();
+				m_storageTableClient = acc.CreateCloudTableClient();
+				m_queueClient = acc.CreateCloudQueueClient();
+
+				CreateTopLevelNodes();
+			}
+		}
+
+		void CreateTopLevelNodes() {
+			m_objectTree.Nodes.Clear();
+
+			m_blobNode = m_objectTree.Nodes.Add("Blobs");
+			SetTreeNode(m_blobNode, IMG_BLOB_STORAGE);
+
+			m_tableNode = m_objectTree.Nodes.Add("Tables");
+			SetTreeNode(m_tableNode, IMG_STORAGE_TABLE);
+
+			m_queueNode = m_objectTree.Nodes.Add("Queues");
+			SetTreeNode(m_tableNode, IMG_STORAGE_QUEUE);
+		}
+
+		void HandleTreeNodeSelection(NodeWrapper nw) {
+			if (nw.Context == null)
+				return;
+			if (nw.Context is CloudBlobContainer && nw.IsLoaded == false) {
+				LoadContainerItems(nw.Context as CloudBlobContainer);
+				nw.IsLoaded = true;
+			}
+			else if (nw.Context is CloudTable) {
+				LoadTableItems(nw.Context as CloudTable);
+			}
+			else if (nw.Context is CloudQueue) {
+				LoadQueueItems(nw.Context as CloudQueue);
+			}
+		}
+
+		void LoadContainers() {
+			LoadBlobContainers();
+			LoadTables();
+			LoadQueues();
+		}
+
+		void RefreshView() {
+			if (m_objectTree.SelectedNode == null)
+				return;
+
+			NodeWrapper nw = m_objectTree.SelectedNode.Tag as NodeWrapper;
+			if (nw.Context == null)
+				return;
+			if (nw.Context is CloudBlobContainer) {
+				LoadContainerItems(nw.Context as CloudBlobContainer);
+				nw.IsLoaded = true;
+			}
+			else if (nw.Context is CloudTable) {
+				LoadTableItems(nw.Context as CloudTable);
+			}			
+		}
+
+		void ShowAbout() {
+			AboutForm form = new AboutForm();
+			form.ShowDialog();
+		}
+
+		#endregion
+
+		#region Block Blob methods 
+
+		void CreateBlobView() {
+			m_objectList.Clear();
+			m_objectList.Columns.Add("Name", 300);
+			m_objectList.Columns.Add("Type", 100);
+			m_objectList.Columns.Add("Created", 100, HorizontalAlignment.Right);
+			m_objectList.Columns.Add("ETag", 100);
+			m_objectList.Columns.Add("Server Encrypted", 50, HorizontalAlignment.Right);
+			m_objectList.Columns.Add("Modified", 100, HorizontalAlignment.Right);
+			m_objectList.Columns.Add("Size", 100, HorizontalAlignment.Right);
+			m_objectList.Columns.Add("Lease State", 70);
+			m_objectList.Columns.Add("Lease Status", 70);
+			m_objectList.Columns.Add("App Status", 100);
+			m_objectList.Columns.Add("Message", 200);
+		}
+
+		void LoadBlobContainers() {
+			var containers = m_blobClient.ListContainers();
+			m_blobNode.Nodes.Clear();
+			TreeNode containersNode = m_blobNode.Nodes.Add("Containers");
+			SetTreeNode(containersNode, IMG_BLOB_STORAGE);
+
+			foreach (var container in containers) {
+				TreeNode containerNode = containersNode.Nodes.Add(container.Name);
+				SetTreeNode(containerNode, 1, false, container);
 			}
 		}
 
@@ -86,7 +261,7 @@ namespace StorageView
 			Stopwatch sw = new Stopwatch();
 			sw.Start();
 			await blob.UploadFromFileAsync(file, new AccessCondition { IfNoneMatchETag = "*" }, 
-				m_blobRequestOptions, CreateOperationContext(file));
+				m_blobRequestOptions, CreateOperationContextIfNeeded());
 			sw.Stop();			
 
 			string status = string.Format("Uploaded in {0} ms", sw.ElapsedMilliseconds);
@@ -175,84 +350,12 @@ namespace StorageView
 			}
 		}
 
-		OperationContext CreateOperationContext(string file) {
-			OperationContext ctx = new OperationContext();
-			ctx.CustomUserAgent = "Storage View";
-			ctx.LogLevel = LogLevel.Verbose;
-			ctx.RequestCompleted += (sender,  e) => {
-				WriteInfoSafe("Req complete. Http status: {0}, bytes out: {1}, bytes in: {2}",
-					e.RequestInformation.HttpStatusCode, e.RequestInformation.EgressBytes, e.RequestInformation.IngressBytes);
-			};
-			ctx.ResponseReceived += (sender, e) => {
-				WriteInfoSafe("Resp recvd. Http status: {0}, bytes out: {1}, bytes in: {2}",
-					e.RequestInformation.HttpStatusCode, e.RequestInformation.EgressBytes, e.RequestInformation.IngressBytes);
-			};
-			ctx.Retrying += (sender, e) => {
-				WriteInfoSafe("Retrying. Http status: {0}, bytes out: {1}, bytes in: {2}",
-					e.RequestInformation.HttpStatusCode, e.RequestInformation.EgressBytes, e.RequestInformation.IngressBytes);
-			};
-			ctx.SendingRequest += (sender, e) => {
-				WriteInfoSafe("Sending req. Http status: {0}, bytes out: {1}, bytes in: {2}",
-					e.RequestInformation.HttpStatusCode, e.RequestInformation.EgressBytes, e.RequestInformation.IngressBytes);
-			};
-			return ctx;
-		}
-
-		void WriteInfoSafe(string format, params object[] args) {
-			this.Invoke((MethodInvoker) delegate {
-				WriteInfo(format, args);
-			});
-		}
-
-		void WriteInfo(string format, params object[] args) {
-			string line = string.Format("{0} {1}", DateTime.Now.ToShortTimeString(),
-				string.Format(format, args));
-			m_txtInfo.Text = m_txtInfo.Text +  line + "\r\n";
-		}
-
-		void SetTreeNode(TreeNode node, int imageIndex, bool isLoaded = true, object context = null) {
-			node.ImageIndex = imageIndex;
-			node.SelectedImageIndex = imageIndex;
-			node.Tag = new NodeWrapper(isLoaded, context);
-		}
-
-		void LoadContainers() {
-			var containers = m_blobClient.ListContainers();
-			m_objectTree.Nodes.Clear();
-
-			TreeNode blobNode = m_objectTree.Nodes.Add("Blobs");
-			SetTreeNode(blobNode, 0);
-			
-			TreeNode containersNode = blobNode.Nodes.Add("Containers");
-			SetTreeNode(containersNode, 0);
-			
-			foreach (var container in containers) {
-				TreeNode containerNode = containersNode.Nodes.Add(container.Name);
-				SetTreeNode(containerNode, 1, false, container);				
-			}
-		}
-
-		void CreateBlobColumns() {
-			m_objectList.Clear();
-			m_objectList.Columns.Add("Name", 300);
-			m_objectList.Columns.Add("Type", 100);
-			m_objectList.Columns.Add("Created", 100, HorizontalAlignment.Right);
-			m_objectList.Columns.Add("ETag", 100);
-			m_objectList.Columns.Add("Server Encrypted", 50, HorizontalAlignment.Right);
-			m_objectList.Columns.Add("Modified", 100, HorizontalAlignment.Right);
-			m_objectList.Columns.Add("Size", 100, HorizontalAlignment.Right);
-			m_objectList.Columns.Add("Lease State", 70);
-			m_objectList.Columns.Add("Lease Status", 70);
-			m_objectList.Columns.Add("App Status", 100);
-			m_objectList.Columns.Add("Message", 200);
-		}
-
 		string GetBlobNameOnly(CloudBlobContainer container, IListBlobItem item) {
 			return item.Uri.LocalPath.Substring(container.Name.Length + 2);
 		}
-		
-		void ShowBlobInList(CloudBlobContainer container, IListBlobItem blob, string status, string message = "") {			
-			var item = m_objectList.Items.Add(GetBlobNameOnly(container, blob), 2);		
+
+		void ShowBlobInList(CloudBlobContainer container, IListBlobItem blob, string status, string message = "") {
+			var item = m_objectList.Items.Add(GetBlobNameOnly(container, blob), 2);
 			item.SubItems.Add("Blob Item");
 			item.SubItems.Add("");
 			item.SubItems.Add("");
@@ -263,40 +366,17 @@ namespace StorageView
 			item.SubItems.Add("");
 			item.SubItems.Add("");
 			item.SubItems.Add(status);
-			item.SubItems.Add(message);			
+			item.SubItems.Add(message);
 			item.Tag = blob;
 		}
 
 		private void ShowBlobInList(CloudBlobContainer container, CloudBlob blob, string status, string message = "") {
 			ListViewItem item = m_objectList.Items.Add(blob.Name, 2);
 			item.Tag = blob;
-			for (int n=1; n < m_objectList.Columns.Count; n++) {
+			for (int n = 1; n < m_objectList.Columns.Count; n++) {
 				item.SubItems.Add("");
 			}
 			UpdateBlobInList(item, status, message);
-
-			/*
-			item.SubItems.Add(blob.BlobType.ToString());
-
-			if (blob.Properties.Created.HasValue) 
-				item.SubItems.Add(blob.Properties.Created.Value.ToLocalTime().ToString());
-			else
-				item.SubItems.Add("");
-			
-			item.SubItems.Add(blob.Properties.ETag);
-			item.SubItems.Add(blob.Properties.IsServerEncrypted ? "Yes" : "No");
-			
-			if (blob.Properties.LastModified.HasValue)
-				item.SubItems.Add(blob.Properties.LastModified.Value.ToLocalTime().ToString());
-			else
-				item.SubItems.Add("");
-
-			item.SubItems.Add(blob.Properties.Length.ToString());
-			item.SubItems.Add(blob.Properties.LeaseState.ToString());
-			item.SubItems.Add(blob.Properties.LeaseStatus.ToString());
-			item.SubItems.Add(status);
-			item.SubItems.Add(message);
-			*/
 		}
 
 		void UpdateBlobInList(ListViewItem listItem, string status = null, string message = null) {
@@ -322,13 +402,13 @@ namespace StorageView
 				listItem.SubItems[7].Text = blob.Properties.LeaseState.ToString();
 				listItem.SubItems[8].Text = blob.Properties.LeaseStatus.ToString();
 				listItem.SubItems[9].Text = status == null ? listItem.SubItems[9].Text : status;
-				listItem.SubItems[10].Text = message == null ? listItem.SubItems[10].Text : message;				
+				listItem.SubItems[10].Text = message == null ? listItem.SubItems[10].Text : message;
 			}
 		}
 
-		private void LoadContainerItems(CloudBlobContainer container) {			
-			CreateBlobColumns();
-			
+		private void LoadContainerItems(CloudBlobContainer container) {
+			CreateBlobView();
+
 			foreach (var blob in container.ListBlobs(null, true, BlobListingDetails.All, null)) {
 				if (blob is CloudBlob) {
 					ShowBlobInList(container, (CloudBlob)blob, "Available");
@@ -356,7 +436,7 @@ namespace StorageView
 				CopyDictionary<string, string>(blob.Metadata, form.Pairs);
 
 				CloudBlockBlob blockBlob = blob as CloudBlockBlob;
-				if (blockBlob != null) {					
+				if (blockBlob != null) {
 					form.Blocks = blockBlob.DownloadBlockList();
 				}
 
@@ -374,7 +454,7 @@ namespace StorageView
 
 		private async void DeleteBlobs() {
 			if (m_objectList.SelectedItems.Count == 0) return;
-			foreach(ListViewItem item in m_objectList.SelectedItems) {
+			foreach (ListViewItem item in m_objectList.SelectedItems) {
 				CloudBlockBlob blob = item.Tag as CloudBlockBlob;
 				if (blob != null) {
 					await blob.DeleteAsync(DeleteSnapshotsOption.None, GetCommonAccessCondition(blob), null, null);
@@ -384,7 +464,7 @@ namespace StorageView
 		}
 
 		AccessCondition GetCommonAccessCondition(CloudBlob blob) {
-			if (m_useETagCheck) {
+			if (CheckETag) {
 				return new AccessCondition {
 					IfMatchETag = blob.Properties.ETag
 				};
@@ -394,7 +474,7 @@ namespace StorageView
 			}
 		}
 
-		private void DownloadBlobs() {
+		void DownloadBlobs() {
 			if (m_objectList.SelectedItems.Count == 0) {
 				MessageBox.Show("No blobs selected for download!", "Error", MessageBoxButtons.OK, MessageBoxIcon.Asterisk);
 				return;
@@ -402,17 +482,17 @@ namespace StorageView
 
 			FolderBrowserDialog dlg = new FolderBrowserDialog {
 				Description = "Select the download location",
-				ShowNewFolderButton = true				
+				ShowNewFolderButton = true
 			};
 
 			if (dlg.ShowDialog() == DialogResult.OK) {
 				// first make a copy of selected blobs so they don't change
 				List<CloudBlob> blobs = new List<CloudBlob>();
-				foreach(ListViewItem item in m_objectList.SelectedItems) {
+				foreach (ListViewItem item in m_objectList.SelectedItems) {
 					blobs.Add(item.Tag as CloudBlob);
 				}
-				
-				foreach(var blob in blobs) {
+
+				foreach (var blob in blobs) {
 					string downloadFile = Path.Combine(dlg.SelectedPath, blob.Name);
 					if (File.Exists(downloadFile)) {
 						WriteInfo("Skipping download of {0} as it exists", downloadFile);
@@ -421,85 +501,17 @@ namespace StorageView
 					WriteInfo("Starting download of {0}", blob.Name);
 					Stopwatch sw = new Stopwatch();
 					sw.Start();
-					blob.DownloadToFileAsync(downloadFile, FileMode.CreateNew, 
-						GetCommonAccessCondition(blob), m_blobRequestOptions, CreateOperationContext(downloadFile));
+					blob.DownloadToFileAsync(downloadFile, FileMode.CreateNew,
+						GetCommonAccessCondition(blob), m_blobRequestOptions, CreateOperationContextIfNeeded());
 					sw.Stop();
 					WriteInfoSafe("{0} finished downloading. Time taken: {1} ms", blob.Name, sw.ElapsedMilliseconds);
 				}
 			}
 		}
 
-		private void RefreshView() {
-			if (m_objectTree.SelectedNode == null)
-				return;
+		#endregion
 
-			if (m_objectTree.SelectedNode.Tag != null) {
-				NodeWrapper nw = m_objectTree.SelectedNode.Tag as NodeWrapper;
-				if (nw.Context == null)
-					return;
-				if (nw.Context is CloudBlobContainer) {
-					LoadContainerItems(nw.Context as CloudBlobContainer);
-					nw.IsLoaded = true;
-				}
-			}
-		}
-
-		async void TakeLease() {
-			if (m_objectList.SelectedItems.Count == 0) {
-				MessageBox.Show("No items have been selected for leasing", "Error", MessageBoxButtons.OK, 
-					MessageBoxIcon.Warning);
-				return;
-			}
-
-			LeaseForm form = new LeaseForm();
-			if (form.ShowDialog() != DialogResult.OK)
-				return;
-
-			foreach(ListViewItem item in m_objectList.SelectedItems) {
-				CloudBlob blob = item.Tag as CloudBlob;
-				if (blob != null) {
-					string proposedLeaseId = Guid.NewGuid().ToString();
-					string leaseId = await blob.AcquireLeaseAsync(form.LeasePeriod, proposedLeaseId, null, null, null);
-					m_leaseIds.Add(item, leaseId);
-					string msg = string.Format("Lease (id={0}) has been obtained on {1}", leaseId, blob.Name);
-					WriteInfo(msg);
-					await blob.FetchAttributesAsync();
-					UpdateBlobInList(item, "Leased", msg);
-				}
-			}
-		}
-
-		async void ReleaseLease() {
-			if (m_objectList.SelectedItems.Count == 0) {
-				MessageBox.Show("No items have been selected for releasing", "Error", MessageBoxButtons.OK,
-					MessageBoxIcon.Warning);
-				return;
-			}
-
-			List<ListViewItem> releasedItems = new List<ListViewItem>();
-
-			foreach(ListViewItem item in m_leaseIds.Keys) {
-				string leaseId = m_leaseIds[item];
-				CloudBlob blob = item.Tag as CloudBlob;
-				if (blob != null) {
-					await blob.ReleaseLeaseAsync(new AccessCondition { LeaseId = leaseId });
-					string msg = string.Format("Lease has been released from {0}", blob.Name);
-					WriteInfo(msg);
-					await blob.FetchAttributesAsync();
-					UpdateBlobInList(item, "Released lease", msg);
-					releasedItems.Add(item);
-				}
-			}
-
-			foreach(ListViewItem item in releasedItems) {
-				m_leaseIds.Remove(item);
-			}
-		}
-
-		void ShowAbout() {
-			AboutForm form = new AboutForm();
-			form.ShowDialog();
-		}
+		#region Append blob methods
 
 		void CreateAppendBlob() {
 			CloudBlobContainer container = (m_objectTree.SelectedNode.Tag as NodeWrapper)
@@ -566,7 +578,7 @@ namespace StorageView
 				UpdateBlobInList(listItem, null, "Appended text");
 			}
 		}
-				
+
 		void AppendFileDataToAppendBlob() {
 			if (m_objectList.SelectedItems.Count == 0)
 				return;
@@ -626,7 +638,7 @@ namespace StorageView
 				string newName = inputForm.InputText;
 				CloudBlob newBlob = container.GetBlobReference(newName);
 				if (newBlob.Exists()) {
-					MessageBox.Show("A blob by the specified name already exists!", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);					
+					MessageBox.Show("A blob by the specified name already exists!", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
 				}
 				else {
 					Stopwatch sw = new Stopwatch();
@@ -642,6 +654,309 @@ namespace StorageView
 			}
 		}
 
+		async void TakeLease() {
+			if (m_objectList.SelectedItems.Count == 0) {
+				MessageBox.Show("No items have been selected for leasing", "Error", MessageBoxButtons.OK,
+					MessageBoxIcon.Warning);
+				return;
+			}
+
+			LeaseForm form = new LeaseForm();
+			if (form.ShowDialog() != DialogResult.OK)
+				return;
+
+			foreach (ListViewItem item in m_objectList.SelectedItems) {
+				CloudBlob blob = item.Tag as CloudBlob;
+				if (blob != null) {
+					string proposedLeaseId = Guid.NewGuid().ToString();
+					string leaseId = await blob.AcquireLeaseAsync(form.LeasePeriod, proposedLeaseId, null, null, null);
+					m_leaseIds.Add(item, leaseId);
+					string msg = string.Format("Lease (id={0}) has been obtained on {1}", leaseId, blob.Name);
+					WriteInfo(msg);
+					await blob.FetchAttributesAsync();
+					UpdateBlobInList(item, "Leased", msg);
+				}
+			}
+		}
+
+		async void ReleaseLease() {
+			if (m_objectList.SelectedItems.Count == 0) {
+				MessageBox.Show("No items have been selected for releasing", "Error", MessageBoxButtons.OK,
+					MessageBoxIcon.Warning);
+				return;
+			}
+
+			List<ListViewItem> releasedItems = new List<ListViewItem>();
+
+			foreach (ListViewItem item in m_leaseIds.Keys) {
+				string leaseId = m_leaseIds[item];
+				CloudBlob blob = item.Tag as CloudBlob;
+				if (blob != null) {
+					await blob.ReleaseLeaseAsync(new AccessCondition { LeaseId = leaseId });
+					string msg = string.Format("Lease has been released from {0}", blob.Name);
+					WriteInfo(msg);
+					await blob.FetchAttributesAsync();
+					UpdateBlobInList(item, "Released lease", msg);
+					releasedItems.Add(item);
+				}
+			}
+
+			foreach (ListViewItem item in releasedItems) {
+				m_leaseIds.Remove(item);
+			}
+		}
+
+		#endregion
+
+		#region Storage Table methods
+
+		void CreateTableView() {
+			m_objectList.Clear();
+			m_objectList.Columns.Add("PartitionKey", 100);
+			m_objectList.Columns.Add("RowKey", 100);
+			m_objectList.Columns.Add("ETag", 100);
+			m_objectList.Columns.Add("TimeStamp", 100);
+		}
+
+		void LoadTables() {
+			OperationContext ctx = CreateOperationContextIfNeeded();
+			IEnumerable<CloudTable> tables = m_storageTableClient.ListTables(null, null, ctx);
+			m_tableNode.Nodes.Clear();
+			foreach (CloudTable table in tables) {
+				TreeNode node = m_tableNode.Nodes.Add(table.Name);
+				node.Tag = new NodeWrapper(false, table);
+			}
+		}
+
+		void CreateStorageTable() {
+			if (m_storageTableClient == null) return;
+			InputForm form = new InputForm("Enter a name for the storage table", "New Table", "", false);
+			if (form.ShowDialog() == DialogResult.OK) {
+				string table = form.InputText;
+				m_storageTableClient.GetTableReference(table).CreateIfNotExists(null,
+					CreateOperationContextIfNeeded());
+				LoadTables();
+			}
+		}
+
+		int TABLE_PARTITIONKEY_INDEX = 0;
+		int TABLE_ROWKEY_INDEX = 1;
+		int TABLE_ETAG_INDEX = 2;
+		int TABLE_TIMESTAMP_INDEX = 3;
+
+		void LoadTableItems(CloudTable table) {
+			CreateTableView();
+			Dictionary<string, int> properties = new Dictionary<string, int>();
+			TableQuery q = new TableQuery();
+			List<DynamicTableEntity> entities = new List<DynamicTableEntity>();
+			TableRequestOptions options = null;
+			var result = table.ExecuteQuery(q, options, CreateOperationContextIfNeeded());
+			entities.AddRange(result);
+
+			foreach (var entity in entities) {
+				foreach (var prop in entity.Properties) {
+					if (!properties.ContainsKey(prop.Key)) {
+						ColumnHeader hdr = m_objectList.Columns.Add(prop.Key, 100);
+						properties.Add(prop.Key, hdr.Index);
+					}
+				}
+			}
+
+			foreach (var entity in entities) {
+				var listItem = m_objectList.Items.Add(entity.PartitionKey);
+				listItem.SubItems.Add(entity.RowKey);
+				listItem.SubItems.Add(entity.ETag);
+				listItem.SubItems.Add(entity.Timestamp.ToString());
+				listItem.Tag = entity;
+
+				for (int n = 4; n < m_objectList.Columns.Count; n++) {
+					listItem.SubItems.Add("");
+				}
+
+				foreach (var keyValues in entity.Properties) {
+					listItem.SubItems[properties[keyValues.Key]].Text = GetPropertyValue(keyValues.Value);
+				}
+			}
+		}
+
+		public string GetPropertyValue(EntityProperty prop) {
+			string result;
+			switch (prop.PropertyType) {
+				case EdmType.Binary:
+					result = "<BINARY DATA>";
+					break;
+
+				case EdmType.Boolean:
+					result = prop.BooleanValue.ToString();
+					break;
+
+				case EdmType.DateTime:
+					result = prop.DateTime.ToString();
+					break;
+
+				case EdmType.Double:
+					result = prop.DoubleValue.ToString();
+					break;
+
+				case EdmType.Guid:
+					result = prop.GuidValue.ToString();
+					break;
+
+				case EdmType.Int32:
+					result = prop.Int32Value.ToString();
+					break;
+
+				case EdmType.Int64:
+					result = prop.Int64Value.ToString();
+					break;
+
+				case EdmType.String:
+					result = prop.StringValue;
+					break;
+
+				default:
+					result = "<UNKNOWN>";
+					break;
+			}
+			return result;
+		}
+
+		void InsertSampleTableItems(CloudTable table) {
+			TableBatchOperation batch = new TableBatchOperation();
+			batch.InsertOrReplace(new Book("9781312871342", "Swami Yoganadna", "Autobiography of a Yogi", 1946, "English"));
+			batch.InsertOrReplace(new Book("1462917925", "Bruce Lee", "Bruce Lee Striking Thoughts: Bruce Lee's Wisdom for Daily Living", 2002, "English"));
+			batch.InsertOrReplace(new Book("0007480687", "Mark Twain", "The Adventures of Tom Sawyer", 1876, "English"));
+			table.ExecuteBatch(batch, null, CreateOperationContextIfNeeded());
+
+			batch = new TableBatchOperation();
+			batch.InsertOrReplace(new Book("9788446033677", "Bonifacio del Carril", "El Principito", 1951, "Spanish"));
+			table.ExecuteBatch(batch, null, CreateOperationContextIfNeeded());
+		}
+
+		void DeleteTableEntities() {
+			if (m_storageTableClient == null || m_objectList.SelectedItems.Count == 0) return;
+			NodeWrapper node = (NodeWrapper)m_objectTree.SelectedNode.Tag;
+			CloudTable table = node.Context as CloudTable;
+			if (table == null) return;
+
+			TableBatchOperation batch = new TableBatchOperation();
+			foreach (ListViewItem item in m_objectList.SelectedItems) {
+				DynamicTableEntity entity = item.Tag as DynamicTableEntity;
+				if (entity != null) {
+					batch.Delete(entity);
+				}
+			}
+
+			if (MessageBox.Show(string.Format("Are you sure you want to delete {0} items?",
+				batch.Count), "Confirm Delete", MessageBoxButtons.YesNo, 
+				MessageBoxIcon.Question) == DialogResult.Yes) {
+				table.ExecuteBatch(batch, null, CreateOperationContextIfNeeded());	
+			}
+
+			LoadTableItems(table);
+		}
+
+		#endregion
+
+		#region Storage queue methods
+
+		void CreateQueueView() {
+			m_objectList.Clear();
+			m_objectList.Columns.Add("Id", 100);
+			m_objectList.Columns.Add("Insertion Time", 100);
+			m_objectList.Columns.Add("Expiration Time", 100);
+			m_objectList.Columns.Add("Deque Count", 100);
+			m_objectList.Columns.Add("String Value", 100);
+			m_objectList.Columns.Add("Byte Size", 100);			
+		}
+
+		void CreateQueue() {
+			if (m_queueClient == null) return;
+			InputForm form = new InputForm("Enter the name of the queue", "Create Queue", "", false);
+			if (form.ShowDialog() == DialogResult.OK) {
+				string queueName = form.InputText;
+				CloudQueue queue = m_queueClient.GetQueueReference(queueName);
+				queue.Create(null, CreateOperationContextIfNeeded());
+				m_queueNode.Nodes.Add(queueName).Tag = new NodeWrapper(false, queue);
+			}
+		}
+
+		void LoadQueues() {
+			if (m_queueClient == null) return;
+			m_queueNode.Nodes.Clear();
+
+			IEnumerable<CloudQueue> queues = m_queueClient.ListQueues(null, QueueListingDetails.All, null, CreateOperationContextIfNeeded());
+			foreach(var queue in queues) {
+				m_queueNode.Nodes.Add(queue.Name).Tag = new NodeWrapper(false, queue);
+			}
+		}
+
+		void AddMessageToList(CloudQueueMessage message) {
+			ListViewItem item = m_objectList.Items.Add(message.Id);
+			item.SubItems.Add(message.InsertionTime.HasValue ? message.InsertionTime.ToString() : "Not Available");
+			item.SubItems.Add(message.ExpirationTime.HasValue ? message.ExpirationTime.ToString() : "Not Available");
+			item.SubItems.Add(message.DequeueCount.ToString());
+			item.SubItems.Add(message.AsString != null ? message.AsString : "Not Available");
+			item.SubItems.Add(message.AsBytes != null ? message.AsBytes.Length.ToString() : "Not Available");
+		}
+
+		void LoadQueueItems(CloudQueue queue) {
+			CreateQueueView();
+			var messages = queue.PeekMessages(m_peekMessageCount, null, CreateOperationContextIfNeeded());
+			foreach(CloudQueueMessage message in messages) {
+				AddMessageToList(message);				
+			}
+		}
+
+		void AddQueueMessage() {
+			if (m_queueClient == null) return;
+			CloudQueue queue = ((NodeWrapper)m_objectTree.SelectedNode.Tag).Context as CloudQueue;
+			if (queue == null) return;
+
+			QueueMessageForm form = new QueueMessageForm();
+			if (form.ShowDialog() == DialogResult.OK) {
+				if (form.MessageType == MessageSendTypes.Text) {
+					queue.AddMessage(new CloudQueueMessage(form.MessageText), form.TTL, form.Delay);
+				}
+				else {
+					byte[] bytes = File.ReadAllBytes(form.FilePath);
+					queue.AddMessage(new CloudQueueMessage(bytes), form.TTL, form.Delay);
+				}
+			}			
+		}
+
+		void DequeueMessages() {
+			CloudQueue queue = ((NodeWrapper)m_objectTree.SelectedNode.Tag).Context as CloudQueue;
+			if (queue != null) {
+				InputForm form = new InputForm("Enter the number of messages to dequeue. Note: items will be removed from the queue.", 
+					"Dequeue", "10", false);
+				if (form.ShowDialog() == DialogResult.OK) {
+					if (!int.TryParse(form.InputText, out int count)) {
+						MessageBox.Show("Invalid count specified", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+						return;
+					}
+					IEnumerable<CloudQueueMessage> messages = queue.GetMessages(count, null, null, CreateOperationContextIfNeeded());
+					m_objectList.Items.Clear();
+					foreach (var message in messages) {
+						AddMessageToList(message);
+					}
+				}
+			}
+		}
+
+		void ClearQueue() {
+			if (m_queueClient == null) return;
+			CloudQueue queue = ((NodeWrapper)m_objectTree.SelectedNode.Tag).Context as CloudQueue;
+			if (queue == null) return;
+			if (ConfirmYesNo("Confirm", "Are you sure you want to clear the queue '{0}'?", 
+				queue.Name) == DialogResult.Yes) {
+				queue.Clear(null, CreateOperationContextIfNeeded());
+				LoadQueueItems(queue);
+			}
+		}
+
+		#endregion
+
 		private void connectToolStripMenuItem_Click(object sender, EventArgs e) {
 			Connect();
 			if (m_blobClient != null) LoadContainers();
@@ -651,20 +966,8 @@ namespace StorageView
 
 		}
 
-		private void m_objectTree_NodeMouseClick(object sender, TreeNodeMouseClickEventArgs e) {
-			if (e.Node.Tag != null) {
-				NodeWrapper nw = e.Node.Tag as NodeWrapper;
-				if (nw.Context == null)
-					return;
-				if (nw.Context is CloudBlobContainer && nw.IsLoaded == false) {
-					LoadContainerItems(nw.Context as CloudBlobContainer);
-					nw.IsLoaded = true;
-				}
-			}
-		}
-
 		private void MainForm_Load(object sender, EventArgs e) {
-			m_useETagCheck = m_mnuBlobCheckETags.Checked;
+			m_mnuBlobCheckETags.Checked = true;
 		}
 
 		private void m_mnuFileExit_Click(object sender, EventArgs e) {
@@ -694,11 +997,7 @@ namespace StorageView
 		private void m_mnuUploadWithMetadata_Click(object sender, EventArgs e) {
 			UploadFilesToBlobWithMetadata();
 		}
-
-		private void m_mnuBlobCheckETags_CheckedChanged(object sender, EventArgs e) {
-			m_useETagCheck = m_mnuBlobCheckETags.Checked;			
-		}
-
+		
 		private void m_mnuDownloadBlobs_Click(object sender, EventArgs e) {
 			DownloadBlobs();
 		}
@@ -733,6 +1032,48 @@ namespace StorageView
 
 		private void m_blobRename_Click(object sender, EventArgs e) {
 			RenameBlob();
+		}
+
+		private void m_mnuInsertSampleEntities_Click(object sender, EventArgs e) {
+			if (m_objectTree.SelectedNode == null) return;			
+			CloudTable table = ((NodeWrapper)m_objectTree.SelectedNode.Tag).Context as CloudTable;
+			if (table == null) return;			
+			if (MessageBox.Show(string.Format("Clicking 'Yes' will insert sample 'Book' entities in your table '{0}'. Do you want to continue?",
+				table.Name), "Confirm", MessageBoxButtons.YesNo,
+				MessageBoxIcon.Question) == DialogResult.Yes) {
+				InsertSampleTableItems(table);
+			}			
+		}
+
+		private void m_createStorageTable_Click(object sender, EventArgs e) {
+			CreateStorageTable();
+		}
+
+		private void m_mnuDeleteEntity_Click(object sender, EventArgs e) {
+			DeleteTableEntities();
+		}
+
+		private void m_mnuCreateQueue_Click(object sender, EventArgs e) {
+			CreateQueue();
+		}
+
+		private void m_mnuClearQueue_Click(object sender, EventArgs e) {
+			ClearQueue();
+		}
+
+		private void m_addQueueMessage_Click(object sender, EventArgs e) {
+			AddQueueMessage();
+		}
+
+		private void m_mnuDequeueMessage_Click(object sender, EventArgs e) {
+			DequeueMessages();
+		}
+
+		private void m_objectTree_AfterSelect(object sender, TreeViewEventArgs e) {
+			if (e.Node.Tag != null) {
+				NodeWrapper nw = e.Node.Tag as NodeWrapper;
+				HandleTreeNodeSelection(nw);
+			}
 		}
 	}
 }
