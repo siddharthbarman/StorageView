@@ -63,6 +63,11 @@
 			this.m_createStorageTable = new System.Windows.Forms.ToolStripMenuItem();
 			this.m_mnuInsertSampleEntities = new System.Windows.Forms.ToolStripMenuItem();
 			this.m_mnuDeleteEntity = new System.Windows.Forms.ToolStripMenuItem();
+			this.m_mnuQueues = new System.Windows.Forms.ToolStripMenuItem();
+			this.m_mnuCreateQueue = new System.Windows.Forms.ToolStripMenuItem();
+			this.m_addQueueMessage = new System.Windows.Forms.ToolStripMenuItem();
+			this.m_mnuDequeueMessages = new System.Windows.Forms.ToolStripMenuItem();
+			this.m_mnuClearQueue = new System.Windows.Forms.ToolStripMenuItem();
 			this.viewToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
 			this.mnuViewRefresh = new System.Windows.Forms.ToolStripMenuItem();
 			this.m_mnuTrackOperationContext = new System.Windows.Forms.ToolStripMenuItem();
@@ -73,11 +78,8 @@
 			this.m_imageList = new System.Windows.Forms.ImageList(this.components);
 			this.m_objectList = new System.Windows.Forms.ListView();
 			this.m_txtInfo = new System.Windows.Forms.TextBox();
-			this.m_mnuQueues = new System.Windows.Forms.ToolStripMenuItem();
-			this.m_mnuCreateQueue = new System.Windows.Forms.ToolStripMenuItem();
-			this.m_mnuClearQueue = new System.Windows.Forms.ToolStripMenuItem();
-			this.m_addQueueMessage = new System.Windows.Forms.ToolStripMenuItem();
-			this.m_mnuDequeueMessages = new System.Windows.Forms.ToolStripMenuItem();
+			this.m_mnuCreateBlobContainer = new System.Windows.Forms.ToolStripMenuItem();
+			this.toolStripSeparator5 = new System.Windows.Forms.ToolStripSeparator();
 			this.m_menuStrip.SuspendLayout();
 			((System.ComponentModel.ISupportInitialize)(this.m_splitter)).BeginInit();
 			this.m_splitter.Panel1.SuspendLayout();
@@ -136,6 +138,8 @@
 			// 
 			this.m_mnuBlobs.CheckOnClick = true;
 			this.m_mnuBlobs.DropDownItems.AddRange(new System.Windows.Forms.ToolStripItem[] {
+            this.m_mnuCreateBlobContainer,
+            this.toolStripSeparator5,
             this.mnuBlobUploadFiles,
             this.m_mnuUploadWithMetadata,
             this.mnuUploadFileInBlocks,
@@ -176,7 +180,7 @@
 			// 
 			this.mnuUploadFileInBlocks.Name = "mnuUploadFileInBlocks";
 			this.mnuUploadFileInBlocks.Size = new System.Drawing.Size(313, 24);
-			this.mnuUploadFileInBlocks.Text = "Upload File in &Multiple Blocks";
+			this.mnuUploadFileInBlocks.Text = "Upload File in M&ultiple Blocks";
 			this.mnuUploadFileInBlocks.Click += new System.EventHandler(this.mnuUploadFileInBlocks_Click);
 			// 
 			// mnuUploadAppendBlob
@@ -344,6 +348,45 @@
 			this.m_mnuDeleteEntity.Text = "&Delete Entities";
 			this.m_mnuDeleteEntity.Click += new System.EventHandler(this.m_mnuDeleteEntity_Click);
 			// 
+			// m_mnuQueues
+			// 
+			this.m_mnuQueues.DropDownItems.AddRange(new System.Windows.Forms.ToolStripItem[] {
+            this.m_mnuCreateQueue,
+            this.m_addQueueMessage,
+            this.m_mnuDequeueMessages,
+            this.m_mnuClearQueue});
+			this.m_mnuQueues.Name = "m_mnuQueues";
+			this.m_mnuQueues.Size = new System.Drawing.Size(68, 23);
+			this.m_mnuQueues.Text = "Queues";
+			// 
+			// m_mnuCreateQueue
+			// 
+			this.m_mnuCreateQueue.Name = "m_mnuCreateQueue";
+			this.m_mnuCreateQueue.Size = new System.Drawing.Size(199, 24);
+			this.m_mnuCreateQueue.Text = "&Create Queue...";
+			this.m_mnuCreateQueue.Click += new System.EventHandler(this.m_mnuCreateQueue_Click);
+			// 
+			// m_addQueueMessage
+			// 
+			this.m_addQueueMessage.Name = "m_addQueueMessage";
+			this.m_addQueueMessage.Size = new System.Drawing.Size(199, 24);
+			this.m_addQueueMessage.Text = "&Add Message";
+			this.m_addQueueMessage.Click += new System.EventHandler(this.m_addQueueMessage_Click);
+			// 
+			// m_mnuDequeueMessages
+			// 
+			this.m_mnuDequeueMessages.Name = "m_mnuDequeueMessages";
+			this.m_mnuDequeueMessages.Size = new System.Drawing.Size(199, 24);
+			this.m_mnuDequeueMessages.Text = "&Dequeue Messages";
+			this.m_mnuDequeueMessages.Click += new System.EventHandler(this.m_mnuDequeueMessage_Click);
+			// 
+			// m_mnuClearQueue
+			// 
+			this.m_mnuClearQueue.Name = "m_mnuClearQueue";
+			this.m_mnuClearQueue.Size = new System.Drawing.Size(199, 24);
+			this.m_mnuClearQueue.Text = "C&lear";
+			this.m_mnuClearQueue.Click += new System.EventHandler(this.m_mnuClearQueue_Click);
+			// 
 			// viewToolStripMenuItem
 			// 
 			this.viewToolStripMenuItem.DropDownItems.AddRange(new System.Windows.Forms.ToolStripItem[] {
@@ -436,7 +479,7 @@
 			this.m_objectList.FullRowSelect = true;
 			this.m_objectList.Location = new System.Drawing.Point(0, 0);
 			this.m_objectList.Name = "m_objectList";
-			this.m_objectList.Size = new System.Drawing.Size(597, 311);
+			this.m_objectList.Size = new System.Drawing.Size(598, 311);
 			this.m_objectList.SmallImageList = this.m_imageList;
 			this.m_objectList.TabIndex = 0;
 			this.m_objectList.UseCompatibleStateImageBehavior = false;
@@ -456,44 +499,17 @@
 			this.m_txtInfo.TabIndex = 4;
 			this.m_txtInfo.WordWrap = false;
 			// 
-			// m_mnuQueues
+			// m_mnuCreateBlobContainer
 			// 
-			this.m_mnuQueues.DropDownItems.AddRange(new System.Windows.Forms.ToolStripItem[] {
-            this.m_mnuCreateQueue,
-            this.m_addQueueMessage,
-            this.m_mnuDequeueMessages,
-            this.m_mnuClearQueue});
-			this.m_mnuQueues.Name = "m_mnuQueues";
-			this.m_mnuQueues.Size = new System.Drawing.Size(68, 23);
-			this.m_mnuQueues.Text = "Queues";
+			this.m_mnuCreateBlobContainer.Name = "m_mnuCreateBlobContainer";
+			this.m_mnuCreateBlobContainer.Size = new System.Drawing.Size(313, 24);
+			this.m_mnuCreateBlobContainer.Text = "Create Blob &Container...";
+			this.m_mnuCreateBlobContainer.Click += new System.EventHandler(this.m_mnuCreateBlobContainer_Click);
 			// 
-			// m_mnuCreateQueue
+			// toolStripSeparator5
 			// 
-			this.m_mnuCreateQueue.Name = "m_mnuCreateQueue";
-			this.m_mnuCreateQueue.Size = new System.Drawing.Size(199, 24);
-			this.m_mnuCreateQueue.Text = "&Create Queue...";
-			this.m_mnuCreateQueue.Click += new System.EventHandler(this.m_mnuCreateQueue_Click);
-			// 
-			// m_mnuClearQueue
-			// 
-			this.m_mnuClearQueue.Name = "m_mnuClearQueue";
-			this.m_mnuClearQueue.Size = new System.Drawing.Size(199, 24);
-			this.m_mnuClearQueue.Text = "C&lear";
-			this.m_mnuClearQueue.Click += new System.EventHandler(this.m_mnuClearQueue_Click);
-			// 
-			// m_addQueueMessage
-			// 
-			this.m_addQueueMessage.Name = "m_addQueueMessage";
-			this.m_addQueueMessage.Size = new System.Drawing.Size(199, 24);
-			this.m_addQueueMessage.Text = "&Add Message";
-			this.m_addQueueMessage.Click += new System.EventHandler(this.m_addQueueMessage_Click);
-			// 
-			// m_mnuDequeueMessages
-			// 
-			this.m_mnuDequeueMessages.Name = "m_mnuDequeueMessages";
-			this.m_mnuDequeueMessages.Size = new System.Drawing.Size(199, 24);
-			this.m_mnuDequeueMessages.Text = "&Dequeue Messages";
-			this.m_mnuDequeueMessages.Click += new System.EventHandler(this.m_mnuDequeueMessage_Click);
+			this.toolStripSeparator5.Name = "toolStripSeparator5";
+			this.toolStripSeparator5.Size = new System.Drawing.Size(310, 6);
 			// 
 			// MainForm
 			// 
@@ -570,6 +586,8 @@
 		private System.Windows.Forms.ToolStripMenuItem m_mnuClearQueue;
 		private System.Windows.Forms.ToolStripMenuItem m_addQueueMessage;
 		private System.Windows.Forms.ToolStripMenuItem m_mnuDequeueMessages;
+		private System.Windows.Forms.ToolStripMenuItem m_mnuCreateBlobContainer;
+		private System.Windows.Forms.ToolStripSeparator toolStripSeparator5;
 	}
 }
 

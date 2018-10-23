@@ -33,6 +33,7 @@ namespace StorageView
 		private TreeNode m_blobNode;
 		private TreeNode m_tableNode;
 		private TreeNode m_queueNode;
+		private TreeNode m_blobContainersNode;
 
 		private const int IDX_STATUS = 8;
 		private const int IMG_STORAGE_STACK = 0;
@@ -57,6 +58,11 @@ namespace StorageView
 		DialogResult ConfirmYesNo(string title, string text, params object[] args) {
 			string str = string.Format(text, args);
 			return MessageBox.Show(str, title, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+		}
+
+		void ShowError(string title, string text, params object[] args) {
+			string str = string.Format(text, args);
+			MessageBox.Show(str, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
 		}
 
 		OperationContext CreateOperationContextIfNeeded() {
@@ -189,6 +195,26 @@ namespace StorageView
 
 		#region Block Blob methods 
 
+		void CreateBlobContainer() {
+			NameWithMetadataForm form = new NameWithMetadataForm {
+				Title = "New Blob Container",
+				DoNotAllowEmptyName = false
+			};
+
+			if (form.ShowDialog() == DialogResult.OK) {
+				string name = form.EntityName;
+				CloudBlobContainer container = m_blobClient.GetContainerReference(name);
+				if (container.Exists(null, CreateOperationContextIfNeeded())) {
+					ShowError("The container {0} already exists!", name);
+					return;
+				}
+
+				container.CreateIfNotExists();
+				TreeNode containerNode = m_blobContainersNode.Nodes.Add(container.Name);
+				SetTreeNode(containerNode, 1, false, container);
+			}
+		}
+
 		void CreateBlobView() {
 			m_objectList.Clear();
 			m_objectList.Columns.Add("Name", 300);
@@ -207,11 +233,11 @@ namespace StorageView
 		void LoadBlobContainers() {
 			var containers = m_blobClient.ListContainers();
 			m_blobNode.Nodes.Clear();
-			TreeNode containersNode = m_blobNode.Nodes.Add("Containers");
-			SetTreeNode(containersNode, IMG_BLOB_STORAGE);
+			m_blobContainersNode = m_blobNode.Nodes.Add("Containers");
+			SetTreeNode(m_blobContainersNode, IMG_BLOB_STORAGE);
 
 			foreach (var container in containers) {
-				TreeNode containerNode = containersNode.Nodes.Add(container.Name);
+				TreeNode containerNode = m_blobContainersNode.Nodes.Add(container.Name);
 				SetTreeNode(containerNode, 1, false, container);
 			}
 		}
@@ -865,6 +891,7 @@ namespace StorageView
 			m_objectList.Columns.Add("Id", 100);
 			m_objectList.Columns.Add("Insertion Time", 100);
 			m_objectList.Columns.Add("Expiration Time", 100);
+			m_objectList.Columns.Add("Next Visible Time", 100);
 			m_objectList.Columns.Add("Deque Count", 100);
 			m_objectList.Columns.Add("String Value", 100);
 			m_objectList.Columns.Add("Byte Size", 100);			
@@ -895,6 +922,7 @@ namespace StorageView
 			ListViewItem item = m_objectList.Items.Add(message.Id);
 			item.SubItems.Add(message.InsertionTime.HasValue ? message.InsertionTime.ToString() : "Not Available");
 			item.SubItems.Add(message.ExpirationTime.HasValue ? message.ExpirationTime.ToString() : "Not Available");
+			item.SubItems.Add(message.NextVisibleTime.HasValue ? message.NextVisibleTime.ToString() : "Not Available");
 			item.SubItems.Add(message.DequeueCount.ToString());
 			item.SubItems.Add(message.AsString != null ? message.AsString : "Not Available");
 			item.SubItems.Add(message.AsBytes != null ? message.AsBytes.Length.ToString() : "Not Available");
@@ -1074,6 +1102,10 @@ namespace StorageView
 				NodeWrapper nw = e.Node.Tag as NodeWrapper;
 				HandleTreeNodeSelection(nw);
 			}
+		}
+
+		private void m_mnuCreateBlobContainer_Click(object sender, EventArgs e) {
+			CreateBlobContainer();
 		}
 	}
 }
