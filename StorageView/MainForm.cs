@@ -1,6 +1,7 @@
 ﻿using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Auth;
 using Microsoft.WindowsAzure.Storage.Blob;
+using Microsoft.WindowsAzure.Storage.File;
 using Microsoft.WindowsAzure.Storage.Queue;
 using Microsoft.WindowsAzure.Storage.Queue.Protocol;
 using Microsoft.WindowsAzure.Storage.Table;
@@ -25,6 +26,7 @@ namespace StorageView
 		private CloudBlobClient m_blobClient;
 		private CloudTableClient m_storageTableClient;
 		private CloudQueueClient m_queueClient;
+        private CloudFileClient m_fileClient;
 		private BlobRequestOptions m_blobRequestOptions = new BlobRequestOptions();
 		private int m_blockSizeKB = 4;
 		private int m_peekMessageCount = 32; // This is the max allowed!
@@ -33,6 +35,7 @@ namespace StorageView
 		private TreeNode m_blobNode;
 		private TreeNode m_tableNode;
 		private TreeNode m_queueNode;
+		private TreeNode m_filesNode;
 		private TreeNode m_blobContainersNode;
 
 		private const int IDX_STATUS = 8;
@@ -42,6 +45,8 @@ namespace StorageView
 		private const int IMG_STORAGE = 3;
 		private const int IMG_STORAGE_TABLE = 4;
 		private const int IMG_STORAGE_QUEUE = 5;
+		private const int IMG_FILES_SHARES = 6;
+		private const int IMG_SHARE_FOLDER = 7;
 
 		bool TrackOperationContext {
 			get { return m_mnuTrackOperationContext.Checked; }
@@ -115,6 +120,7 @@ namespace StorageView
 			m_blobClient = null;
 			m_storageTableClient = null;
 			m_queueClient = null;
+            m_fileClient = null;
 
 			ConnectForm form = new ConnectForm();
 
@@ -131,7 +137,8 @@ namespace StorageView
 				m_blobClient = acc.CreateCloudBlobClient();
 				m_storageTableClient = acc.CreateCloudTableClient();
 				m_queueClient = acc.CreateCloudQueueClient();
-
+                m_fileClient = acc.CreateCloudFileClient();
+                
 				CreateTopLevelNodes();
 			}
 		}
@@ -147,9 +154,12 @@ namespace StorageView
 
 			m_queueNode = m_objectTree.Nodes.Add("Queues");
 			SetTreeNode(m_tableNode, IMG_STORAGE_QUEUE);
+
+			m_filesNode = m_objectTree.Nodes.Add("Files");
+			SetTreeNode(m_filesNode, IMG_FILES_SHARES);
 		}
 
-		void HandleTreeNodeSelection(NodeWrapper nw) {
+		void HandleTreeNodeSelection(NodeWrapper nw, TreeNode node) {
 			if (nw.Context == null)
 				return;
 			if (nw.Context is CloudBlobContainer && nw.IsLoaded == false) {
@@ -162,12 +172,21 @@ namespace StorageView
 			else if (nw.Context is CloudQueue) {
 				LoadQueueItems(nw.Context as CloudQueue);
 			}
+			else if (nw.Context is CloudFileShare) {
+				LoadFileShareFiles(nw.Context as CloudFileShare, node);
+				nw.IsLoaded = true;
+			}
+			else if (nw.Context is CloudFileDirectory) {
+				LoadFileShareDirectoryFiles(node);
+
+			}
 		}
 
 		void LoadContainers() {
 			LoadBlobContainers();
 			LoadTables();
 			LoadQueues();
+			LoadFileShares();
 		}
 
 		void RefreshView() {
@@ -175,15 +194,19 @@ namespace StorageView
 				return;
 
 			NodeWrapper nw = m_objectTree.SelectedNode.Tag as NodeWrapper;
-			if (nw.Context == null)
+			if (nw.Context == null) {
 				return;
-			if (nw.Context is CloudBlobContainer) {
+			}
+			else if (nw.Context is CloudBlobContainer) {
 				LoadContainerItems(nw.Context as CloudBlobContainer);
 				nw.IsLoaded = true;
 			}
 			else if (nw.Context is CloudTable) {
 				LoadTableItems(nw.Context as CloudTable);
-			}			
+			}
+			else if (nw.Context is CloudFileShare || nw.Context is CloudFileDirectory) {
+				LoadFileShareDirectoryFiles(m_objectTree.SelectedNode);
+			}
 		}
 
 		void ShowAbout() {
@@ -927,7 +950,7 @@ namespace StorageView
 			item.SubItems.Add(message.AsString != null ? message.AsString : "Not Available");
 			item.SubItems.Add(message.AsBytes != null ? message.AsBytes.Length.ToString() : "Not Available");
 		}
-
+			   
 		void LoadQueueItems(CloudQueue queue) {
 			CreateQueueView();
 			var messages = queue.PeekMessages(m_peekMessageCount, null, CreateOperationContextIfNeeded());
@@ -980,6 +1003,210 @@ namespace StorageView
 				queue.Name) == DialogResult.Yes) {
 				queue.Clear(null, CreateOperationContextIfNeeded());
 				LoadQueueItems(queue);
+			}
+		}
+
+        #endregion
+
+        #region File methods
+
+		void LoadFileShares() {
+			m_filesNode.Nodes.Clear();
+			foreach(var share in m_fileClient.ListShares(null, ShareListingDetails.All, null, CreateOperationContextIfNeeded())) {
+				TreeNode node = m_filesNode.Nodes.Add(share.Name);
+				SetTreeNode(node, IMG_SHARE_FOLDER, false, share);
+			}
+		}
+
+        void CreateFileShare() {
+            InputForm form = new InputForm("Enter the name of the new file share", "New Share", "newshare", false);
+            if (form.ShowDialog() == DialogResult.OK) {
+				string name = form.InputText;
+				CloudFileShare share = m_fileClient.GetShareReference(name);
+				if (share.Exists(null, CreateOperationContextIfNeeded())) {
+					ShowError("File Share", "The file share {0} already exists!", name);					
+				}
+				else {
+					if (share.CreateIfNotExists(null, CreateOperationContextIfNeeded())) {
+						TreeNode node = m_filesNode.Nodes.Add(share.Name);
+						SetTreeNode(node, IMG_SHARE_FOLDER, false, share);
+					}
+					else {
+						ShowError("Error", "Failed to create share named {0}", name);
+					}
+				}
+            }            
+        }
+
+		void CreateShareView() {
+			m_objectList.Clear();
+			m_objectList.Columns.Add("Name", 100);
+			m_objectList.Columns.Add("Size (Bytes)", 100);
+			m_objectList.Columns.Add("Uri", 100);			
+		}
+
+		void LoadFileShareFiles(CloudFileShare share, TreeNode node) {
+			CloudFileDirectory root = share.GetRootDirectoryReference();			
+			IEnumerable<IListFileItem> items = root.ListFilesAndDirectories(null, CreateOperationContextIfNeeded());
+			CreateShareView();
+			ListFilesAndDirectories(node, items);
+		}
+
+		void LoadFileShareDirectoryFiles(TreeNode node) {
+			NodeWrapper nw = (NodeWrapper)node.Tag;
+			CloudFileDirectory dir = null;
+			if (nw.Context is CloudFileShare) {
+				dir = (nw.Context as CloudFileShare).GetRootDirectoryReference();
+			}
+			else if (nw.Context is CloudFileDirectory) {
+				dir = (CloudFileDirectory)nw.Context;
+			}
+
+			if (dir != null) { 
+				CreateShareView();
+				ListFilesAndDirectories(node, dir.ListFilesAndDirectories(null, CreateOperationContextIfNeeded()));				
+			}
+		}
+
+		void ListCloudFile(CloudFile cloudFile) {
+			ListViewItem item = m_objectList.Items.Add(cloudFile.Name);
+			item.SubItems.Add(cloudFile.Properties.Length.ToString());
+			item.SubItems.Add(cloudFile.Uri.AbsolutePath);
+			item.Tag = cloudFile;
+		}
+
+		void ListFilesAndDirectories(TreeNode parentNode, IEnumerable<IListFileItem> items) {
+			foreach (var cloudItem in items) {
+				CloudFile cloudFile = cloudItem as CloudFile;
+				if (cloudFile != null) {
+					ListCloudFile(cloudFile);
+				}
+				else {
+					CloudFileDirectory cloudDir = cloudItem as CloudFileDirectory;
+					if (cloudDir != null && (parentNode.Tag as NodeWrapper).IsLoaded == false) {
+						TreeNode dirNode = parentNode.Nodes.Add(cloudDir.Name);
+						SetTreeNode(dirNode, IMG_FOLDER, false, cloudDir);
+					}
+				}
+			}
+		}
+
+		void CreateShareDirectory() {
+			CloudFileShare share = (m_objectTree.SelectedNode.Tag as NodeWrapper).Context as CloudFileShare;
+			CloudFileDirectory dir = null;
+			if (share != null) {				
+				dir = share.GetRootDirectoryReference();				
+			}			
+			else {
+				dir = (m_objectTree.SelectedNode.Tag as NodeWrapper).Context as CloudFileDirectory;
+			}
+
+			if (dir != null) {
+				InputForm form = new InputForm("Enter the directory name", "New Directory", "folder", false);
+				if (form.ShowDialog() == DialogResult.OK) {
+					string directoryName = form.InputText;
+					CloudFileDirectory newDir = dir.GetDirectoryReference(directoryName);
+					if (newDir.Exists()) {
+						ShowError("Exists", "The specified directory '{0}' already exists!", directoryName);
+						return;
+					}
+					newDir.Create(null, CreateOperationContextIfNeeded());
+					SetTreeNode(m_objectTree.SelectedNode.Nodes.Add(directoryName), IMG_FOLDER, false, newDir);
+				}
+			}
+		}
+
+		async void UploadShareFile() {
+			NodeWrapper nw = m_objectTree.SelectedNode.Tag as NodeWrapper;
+			CloudFileShare share = nw.Context as CloudFileShare;
+			CloudFileDirectory dir = null;
+			if (share != null) {
+				dir = share.GetRootDirectoryReference();
+			}
+			else {
+				dir = nw.Context as CloudFileDirectory;
+				if (dir == null) {
+					ShowError("Invalid Object", "Select a File-share or a directory under a file share first!");
+					return;
+				}
+			}
+
+			OpenFileDialog dlg = new OpenFileDialog {
+				CheckFileExists = true,
+				Multiselect = false,
+				Title = "Select files to upload",
+				ValidateNames = true
+			};
+
+			if (dlg.ShowDialog() == DialogResult.OK) {
+				string filename = Path.GetFileName(dlg.FileName);
+				string filepath = dlg.FileName;
+				CloudFile file = dir.GetFileReference(filename);
+				if (file.Exists()) {
+					if (ConfirmYesNo("File exists", "The file {0} already exists, do you want to overwrite it?", 
+						filename) == DialogResult.No) {
+						return;
+					}
+					file.Delete(null, null, CreateOperationContextIfNeeded());
+				}				
+
+				using (FileStream localStream = File.OpenRead(filepath)) {					
+					using (CloudFileStream cloudStream = file.OpenWrite(localStream.Length, null, null, CreateOperationContextIfNeeded())) {
+						int bufferSize = m_blockSizeKB * 1024;
+						byte[] bytes = new byte[bufferSize];						
+						int bytesRead = localStream.Read(bytes, 0, bufferSize);
+						while (bytesRead > 0) {
+							await cloudStream.WriteAsync(bytes, 0, bytesRead);							
+							bytesRead = localStream.Read(bytes, 0, bufferSize);
+						}
+						cloudStream.Close();
+					}
+				}
+
+				ListCloudFile(file);
+			}
+		}
+
+		async void DeleteShareFiles() {
+			if (m_objectList.SelectedItems.Count == 0) return;
+			List<KeyValuePair<ListViewItem, CloudFile>> files = new List<KeyValuePair<ListViewItem, CloudFile>>();
+			foreach(ListViewItem item in m_objectList.SelectedItems) {
+				if (item.Tag is CloudFile) files.Add(new KeyValuePair<ListViewItem, CloudFile>(item, (CloudFile)item.Tag));
+			}
+
+			if (files.Count > 0) {
+				if (ConfirmYesNo("Confirm Delete", "Are you sure you want to delete these {0} files?", files.Count) 
+					== DialogResult.No) {
+					return;
+				}
+			}
+
+			foreach(KeyValuePair<ListViewItem, CloudFile> deleteItem  in files) {
+				await deleteItem.Value.DeleteAsync();
+				m_objectList.Items.Remove(deleteItem.Key);
+			}
+		}
+
+		void DeleteShareDirectory() {
+			if (m_objectTree.SelectedNode == null) return;
+			NodeWrapper nw = (NodeWrapper)(m_objectTree.SelectedNode.Tag);
+			CloudFileDirectory dir = nw.Context as CloudFileDirectory;
+			if (dir != null) {
+				dir.DeleteIfExists();
+				m_objectTree.Nodes.Remove(m_objectTree.SelectedNode);
+			}
+		}
+
+		void DeleteShare() {
+			if (m_objectTree.SelectedNode == null) return;
+			NodeWrapper nw = (NodeWrapper)(m_objectTree.SelectedNode.Tag);
+			CloudFileShare share = nw.Context as CloudFileShare;
+			if (share != null) {
+				if (ConfirmYesNo("Confirm Delete", "Are you sure you want to delete the fileshare '{0}'?", 
+					share.Name) == DialogResult.Yes) {
+					share.Delete(null, null, CreateOperationContextIfNeeded());
+					m_objectTree.Nodes.Remove(m_objectTree.SelectedNode);
+				}
 			}
 		}
 
@@ -1100,12 +1327,37 @@ namespace StorageView
 		private void m_objectTree_AfterSelect(object sender, TreeViewEventArgs e) {
 			if (e.Node.Tag != null) {
 				NodeWrapper nw = e.Node.Tag as NodeWrapper;
-				HandleTreeNodeSelection(nw);
+				HandleTreeNodeSelection(nw, e.Node);
 			}
 		}
 
 		private void m_mnuCreateBlobContainer_Click(object sender, EventArgs e) {
 			CreateBlobContainer();
+		}
+
+        private void mnuFileShareCreate_Click(object sender, EventArgs e)
+        {
+            CreateFileShare();
+        }
+
+		private void m_mnuCreateShareDirectory_Click(object sender, EventArgs e) {
+			CreateShareDirectory();
+		}
+
+		private void m_mnuUploadShareFile_Click(object sender, EventArgs e) {
+			UploadShareFile();
+		}
+
+		private void deleteFilesToolStripMenuItem_Click(object sender, EventArgs e) {
+			DeleteShareFiles();
+		}
+
+		private void m_mnuShareDeleteDirectory_Click(object sender, EventArgs e) {
+			DeleteShareDirectory();
+		}
+
+		private void m_mnuFileShareDeleteShare_Click(object sender, EventArgs e) {
+			DeleteShare();
 		}
 	}
 }
